@@ -1,0 +1,281 @@
+# Kubernetes deployment yaml for motioneye
+# This file sets up a single motioneye instance with 4 cameras
+#
+# TODO 
+#  - set up a volume mount for mask files
+#  - Consider porting to helm so it can be more dynamic based on input camera data, and nfs server
+
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: motioneye
+spec:
+    selector:
+        matchLabels:
+            app: motioneye
+    replicas: 1
+    template:
+        metadata:
+            labels:
+                app: motioneye
+        spec:
+            # Motioneye requires a R/W conf dir, so this init container
+            # helps copy over the configMap files to a shared R/W emptyDir mount
+            initContainers:
+            - name: setup
+              image: docker.io/ccrisan/motioneye:master-amd64
+              imagePullPolicy: IfNotPresent
+              volumeMounts:
+              - name: conf-dir
+                mountPath: /etc/motioneye
+              - name: motioneye-conf
+                mountPath: /conf
+              - name: secrets
+                mountPath: /secrets
+              command: 
+              - "sh"
+              - "-c"
+              - >
+                mkdir -p /etc/motioneye &&
+                echo "Relocating configuration files..." &&
+                cp /conf/*.conf /etc/motioneye/ &&
+                for f in /etc/motioneye/camera*.conf; do 
+                    cat /conf/camera-common >> ${f} ;
+                done &&
+                echo "Stitching in secrets..." &&
+                for f in /etc/motioneye/camera*.conf; do 
+                    cat /secrets/camera-secrets >> ${f} ;
+                done &&
+                cat /secrets/daemon-secrets >> /etc/motioneye/motion.conf &&
+                echo "Done." 
+            containers:
+            - name: daemon
+              image: docker.io/ccrisan/motioneye:master-amd64
+              imagePullPolicy: IfNotPresent
+              resources:
+                requests:
+                    memory: "1000Mi"
+                    cpu: "3.0"
+              ports:
+              - containerPort: 7999
+              - containerPort: 8765
+              - containerPort: 8081
+              - containerPort: 8082
+              - containerPort: 8083
+              - containerPort: 8084
+              volumeMounts:
+              - name: conf-dir
+                mountPath: /etc/motioneye
+              - name: timezone
+                mountPath: /etc/localtime 
+                readOnly: true
+              - name: log-dir
+                mountPath: /var/log
+              - name: media
+                mountPath: /var/lib/motioneye
+            - name: log
+              image: docker.io/ccrisan/motioneye:master-amd64
+              imagePullPolicy: IfNotPresent
+              volumeMounts:
+              - name: log-dir
+                mountPath: /var/log
+              command: 
+              - "sh"
+              - "-c"
+              - >
+                echo "Tailing the motion log file..." &&
+                while true; do
+                    tail -F /var/log/motion.log;
+                    sleep 2 &
+                    wait;
+                done;
+            volumes:
+            - name: conf-dir
+              emptyDir: {}
+            - name: log-dir
+              emptyDir: {}
+            - name: media
+              nfs:
+                # Modify for your NFS server and location to store the recorded clips
+                server: diskstation
+                path: /volume1/video/SecurityCameras/jordan
+            - name: timezone
+              hostPath:
+                path: /etc/localtime
+                type: File
+            - name: secrets
+              secret:
+                secretName: motioneye-secrets
+            - name: motioneye-conf
+              configMap:
+                name: motioneye
+                items:
+                - key: motioneye.conf
+                  path: motioneye.conf
+                - key: motion.conf
+                  path: motion.conf
+                - key: camera-common
+                  path: camera-common
+                - key: camera-1
+                  path: camera-1.conf
+                - key: camera-2
+                  path: camera-2.conf
+                - key: camera-3
+                  path: camera-3.conf
+                - key: camera-4
+                  path: camera-4.conf
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+    name: motioneye
+    labels:
+        app: motioneye
+spec:
+    type: NodePort
+    ports:
+    - port: 7999
+      name: "7999"
+    - port: 8765
+      name: "8765"
+      nodePort: 32765
+    - port: 8081
+      name: "8081"
+    - port: 8082
+      name: "8082"
+    - port: 8083
+      name: "8083"
+    - port: 8084
+      name: "8084"
+    selector:
+        app: motioneye
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: motioneye
+data:
+  motioneye.conf: |
+    conf_path /etc/motioneye
+    run_path /var/run
+    log_path /var/log
+    media_path /var/lib/motioneye
+    log_level info
+    listen 0.0.0.0
+    port 8765
+    motion_control_localhost true
+    motion_control_port 7999
+    motion_check_interval 10
+    motion_restart_on_errors false
+    mount_check_interval 300
+    cleanup_interval 43200
+    remote_request_timeout 10
+    mjpg_client_timeout 10
+    mjpg_client_idle_timeout 10
+    smb_shares false
+    smb_mount_root /media
+    local_time_file /etc/localtime
+    enable_reboot false
+    smtp_timeout 60
+    list_media_timeout 120
+    list_media_timeout_email 10
+    zip_timeout 500
+    timelapse_timeout 500
+    add_remove_cameras true
+    http_basic_auth false
+  motion.conf: |
+    webcontrol_interface 0
+    webcontrol_port 7999
+    setup_mode off
+    #setup_mode on
+    webcontrol_parms 2
+    webcontrol_localhost off
+    camera camera-1.conf
+    camera camera-2.conf
+    camera camera-3.conf
+    camera camera-4.conf
+  camera-common: |
+    # Preview stuff
+    #stream_preview_method 3
+    # Some debug settings
+    picture_output_motion off
+    picture_output off
+    movie_output_motion off
+    #locate_motion_mode on
+    #locate_motion_style redbox
+    # Tuning settings
+    lightswitch_percent 25
+    minimum_motion_frames 20
+    noise_tune on
+    post_capture 20
+    pre_capture 5
+    picture_quality 85
+    smart_mask_speed 7
+    threshold_tune on
+    despeckle_filter EeEeEedDdDdDl
+    auto_brightness off
+    emulate_motion off
+    event_gap 60
+    movie_output on
+    movie_quality 100
+    movie_codec mp4:libx264 
+    framerate 10
+    movie_max_time 1800
+    movie_filename %Y-%m-%d/%H-%M-%S
+    netcam_keepalive off
+    netcam_use_tcp on
+    on_event_end /usr/local/lib/python2.7/dist-packages/motioneye/scripts/relayevent.sh "/etc/motioneye/motioneye.conf" stop %t
+    on_event_start /usr/local/lib/python2.7/dist-packages/motioneye/scripts/relayevent.sh "/etc/motioneye/motioneye.conf" start %t
+    on_movie_end /usr/local/lib/python2.7/dist-packages/motioneye/scripts/relayevent.sh "/etc/motioneye/motioneye.conf" movie_end %t %f
+    on_picture_save /usr/local/lib/python2.7/dist-packages/motioneye/scripts/relayevent.sh "/etc/motioneye/motioneye.conf" picture_save %t %f
+    picture_filename 
+    rotate 0
+    snapshot_filename 
+    snapshot_interval 0
+    stream_auth_method 0
+    stream_localhost off
+    stream_maxrate 5
+    stream_motion off
+    stream_quality 85
+    text_changes off
+    text_scale 2
+    text_right %Y-%m-%d\n%T
+  camera-1: |
+    height 1520
+    width 2688
+    netcam_url rtsp://camporch/cam/realmonitor?channel=1&subtype=00
+    camera_name Porch
+    text_left Jordan Porch
+    target_dir /var/lib/motioneye/Camera1
+    #mask_file /etc/motioneye/driveway-mask.pgm
+    stream_port 8081
+  camera-2: |
+    height 1920
+    width 2560
+    netcam_url rtsp://camdriveway/h264Preview_01_main
+    camera_name Driveway
+    text_left Jordan Driveway
+    target_dir /var/lib/motioneye/Camera2
+    #mask_file /etc/motioneye/driveway-mask.pgm
+    stream_port 8082
+  camera-3: |
+    height 1920
+    width 2560
+    netcam_url rtsp://camsideyard/h264Preview_01_main
+    camera_name Side Yard
+    text_left Jordan Side Yard
+    target_dir /var/lib/motioneye/Camera3
+    #mask_file /etc/motioneye/driveway-mask.pgm
+    stream_port 8083
+  camera-4: |
+    height 1920
+    width 2560
+    netcam_url rtsp://camgarden/h264Preview_01_main
+    camera_name Garden
+    text_left Jordan Garden
+    target_dir /var/lib/motioneye/Camera4
+    #mask_file /etc/motioneye/driveway-mask.pgm
+    stream_port 8084
